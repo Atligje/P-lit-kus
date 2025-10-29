@@ -1,0 +1,5 @@
+{
+  "name": "Leita í samráðsgátt",
+  "description": "An application to analyze Icelandic government cases from Samráðsgátt, look for updates on Alþingi, and summarize them using AI. It also includes an AI-powered image generator and a chatbot.",
+  "requestFramePermissions": []
+}
