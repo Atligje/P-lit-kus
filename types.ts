@@ -86,3 +86,18 @@ export interface ChatMessage {
   role: 'user' | 'model';
   parts: { text: string }[];
 }
+
+/**
+ * A structured response object returned by the API client for every request.
+ * This prevents the need for fragile try/catch blocks for handling HTTP errors
+ * like 404, which was the root cause of a recurring bug.
+ */
+export interface ApiResponse<T> {
+  success: boolean;
+  data: T | null;
+  status: number;
+  error?: {
+    message: string;
+    body: string;
+  };
+}
