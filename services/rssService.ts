@@ -1,164 +1,97 @@
-import { apiClient } from './apiClient';
-import type { RssItem, ApiCase, CaseComment } from '../types';
+// src/services/cases.ts
+import { apiClient } from './apiClient'
+import type { ApiCase, CaseComment } from '../types'
 
-interface CaseSearchResponse {
-  cases: ApiCase[];
-  total: number;
-}
+interface CaseSearchResponse { cases: ApiCase[]; total: number }
 
-/**
- * Fetches a comprehensive list of cases from the API.
- * This function now fetches a large set of cases to enable client-side searching and filtering,
- * making the UI more responsive and reliable.
- * @returns A promise that resolves to an array of ApiCase.
- */
 export const searchCases = async (): Promise<ApiCase[]> => {
-  try {
-    const params = {
-      pageSize: '1500',
-      orderBy: 'LastUpdated',
-    };
+  const params = { pageSize: '1500', orderBy: 'LastUpdated' }
+  const res = await apiClient.get<CaseSearchResponse>('/api/cases', params)
+  if (!res.success) throw new Error('Gat ekki sótt málalista.')
+  return res.data?.cases || []
+}
 
-    const response = await apiClient.get<CaseSearchResponse>('/api/cases', params);
-    
-    if (!response.success) {
-      console.error('Error in searchCases service:', response.error);
-      throw new Error('Gat ekki sótt málalista.');
-    }
-    
-    return response.data?.cases || [];
-
-  } catch (error) {
-    console.error('Error processing searchCases:', error);
-    // Re-throw the error to be handled by the UI component
-    throw error;
-  }
-};
-
-
-/**
- * Fetches a single case by its ID using the centralized API client.
- * @param id - The ID of the case to fetch.
- * @returns A promise that resolves to the detailed ApiCase object.
- */
 export const fetchCaseById = async (id: string): Promise<ApiCase> => {
-  if (!id) {
-    const error = new Error("A valid case ID is required.");
-    console.error(error);
-    throw error;
-  }
-  
-  const response = await apiClient.get<ApiCase>(`/api/cases/${id}`);
+  if (!id) throw new Error('A valid case ID is required.')
+  const res = await apiClient.get<ApiCase>(`/api/cases/${id}`)
+  if (!res.success) throw new Error(`Gat ekki sótt mál með ID: ${id}.`)
+  if (!res.data) throw new Error(`Ekkert mál fannst með ID: ${id}.`)
+  return res.data
+}
 
-  if (!response.success) {
-      console.error(`Error in fetchCaseById service for ID ${id}:`, response.error);
-      throw new Error(`Gat ekki sótt mál með ID: ${id}.`);
-  }
-  
-  if (!response.data) {
-      throw new Error(`Ekkert mál fannst með ID: ${id}.`);
-  }
-  
-  return response.data;
-};
+/* ---------- GraphQL docs (safe minimal selection) ---------- */
 
-// The GraphQL query to get comments for a case.
-// FIX: The query has been updated to use the 'caseAdvices' field. All previous
-// attempts ('advice', 'advices', 'adviceList') have been invalidated by the API.
-const GET_CASE_COMMENTS_QUERY = `
-query ConsultationPortalCaseById($input: ConsultationPortalCaseInput!) {
+const GET_CASE_META = `
+query CaseMeta($input: ConsultationPortalCaseInput!) {
   consultationPortalCaseById(input: $input) {
-    caseAdvices {
-      id
-      participantName
-      content
-      created
-      adviceFiles {
-        id
-        name
-      }
-    }
+    id
   }
 }
-`;
+`
 
-// Helper type for the raw GraphQL response.
-interface GraphQLAdvice {
-  id: number;
-  participantName: string;
-  content: string;
-  created: string;
-  adviceFiles: { id: string; name: string; }[];
-}
-
-interface GraphQLResponse {
-  data: {
-    consultationPortalCaseById: {
-      caseAdvices: GraphQLAdvice[];
-    }
+const GET_CASE_ADVICES_MINIMAL = `
+query CaseAdvices($input: ConsultationPortalCaseInput!) {
+  consultationPortalAdviceByCaseId(input: $input) {
+    id
+    participantName
+    content
+    created
   }
 }
+`
 
-/**
- * Maps the data structure from the GraphQL API to the app's internal CaseComment type.
- */
-const mapGraphQLAdviceToCaseComment = (advice: GraphQLAdvice, caseId: number): CaseComment => ({
-  id: advice.id,
-  caseId: caseId,
-  contact: advice.participantName,
-  comment: advice.content || "Engin athugasemd fylgdi.", // Handle empty comments from API
-  created: advice.created,
-  attachments: advice.adviceFiles.map(file => ({
-    id: file.id,
-    name: file.name,
-    fileType: file.name.split('.').pop() || '', // Heuristic to get file type
-  })),
-});
+/* ---------- tiny GQL helper ---------- */
 
-/**
- * Fetches all comments (submissions) for a specific case.
- *
- * This function has been updated to use the island.is GraphQL API, which is
- * what the public-facing website uses. This approach is more reliable for
- * fetching comments than the previous REST endpoint, which was found to be
- * inconsistent for some cases.
- *
- * @param id - The ID of the case.
- * @returns A promise that resolves to an array of CaseComment.
- */
+type GraphQLError = { message?: string; extensions?: { code?: string } }
+type GraphQLResp<T> = { data?: T; errors?: GraphQLError[] }
+
+async function postGraphQL<T>(query: string, variables: Record<string, unknown>, operationName: string) {
+  const endpoint = 'https://island.is/api/graphql'
+  return apiClient.post<GraphQLResp<T>>(endpoint, { query, variables, operationName })
+}
+
+/* ---------- public API ---------- */
+
 export const fetchCaseComments = async (id: string): Promise<CaseComment[]> => {
-    const graphqlApiUrl = 'https://island.is/api/graphql';
-    const caseIdInt = parseInt(id, 10);
+  const caseId = Number.parseInt(id, 10)
+  if (Number.isNaN(caseId)) throw new Error('A valid numeric case ID is required.')
 
-    if (isNaN(caseIdInt)) {
-        const error = new Error("A valid numeric case ID is required.");
-        console.error(error);
-        throw error;
-    }
+  // Ensure case exists
+  {
+    const meta = await postGraphQL<{ consultationPortalCaseById?: { id?: number | null } | null }>(
+      GET_CASE_META,
+      { input: { caseId } },
+      'CaseMeta',
+    )
+    if (!meta.success) throw new Error('Gat ekki sótt umsagnir fyrir mál.')
+    const found = !!meta.data?.data?.consultationPortalCaseById?.id
+    if (!found) return []
+  }
 
-    const body = {
-        operationName: 'ConsultationPortalCaseById',
-        variables: {
-            input: {
-                caseId: caseIdInt,
-            },
-        },
-        query: GET_CASE_COMMENTS_QUERY,
-    };
+  // Fetch advices with minimal, schema-safe selection
+  const adv = await postGraphQL<{ consultationPortalAdviceByCaseId?: Array<{
+    id: number
+    participantName?: string
+    content?: string | null
+    created: string
+  }> | null }>(
+    GET_CASE_ADVICES_MINIMAL,
+    { input: { caseId } },
+    'CaseAdvices',
+  )
 
-    const response = await apiClient.post<GraphQLResponse>(graphqlApiUrl, body);
+  if (!adv.success) throw new Error('Gat ekki sótt umsagnir fyrir mál.')
 
-    if (!response.success) {
-        console.error(`Error in fetchCaseComments (GraphQL) service for ID ${id}:`, response.error);
-        throw new Error('Gat ekki sótt umsagnir fyrir mál.');
-    }
+  const items = adv.data?.data?.consultationPortalAdviceByCaseId ?? []
+  if (!Array.isArray(items) || items.length === 0) return []
 
-    const caseAdvicesResult = response.data?.data?.consultationPortalCaseById?.caseAdvices;
-    
-    if (!caseAdvicesResult) {
-        // This handles cases with no comments or if the API response structure is unexpected.
-        return [];
-    }
+  return items.map((a) => ({
+    id: a.id,
+    caseId,
+    contact: a.participantName ?? '',
+    comment: a.content || 'Engin athugasemd fylgdi.',
+    created: a.created,
+    attachments: [], // schema has no files/adviceFiles; keep empty
+  }))
+}
 
-    return caseAdvicesResult.map(advice => mapGraphQLAdviceToCaseComment(advice, caseIdInt));
-};
